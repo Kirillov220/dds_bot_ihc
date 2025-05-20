@@ -1,6 +1,4 @@
 import os
-API_TOKEN = "908109651:AAGi26LN4zvmyplWNx9wCiO9U0yMqZYHUL0"
-
 from aiogram import Bot, Dispatcher, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
@@ -13,72 +11,55 @@ import logging
 import sheets
 from roles import MANAGER_MAP
 
-
 API_TOKEN = os.getenv("BOT_TOKEN")
-
-logging.basicConfig(level=logging.INFO)
-
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot, storage=MemoryStorage())
 
+logging.basicConfig(level=logging.INFO)
+
+# --- Машина состояний ---
 class AddRecord(StatesGroup):
     amount = State()
     comment = State()
 
-main_menu = types.ReplyKeyboardMarkup(resize_keyboard=True)
-main_menu.add(
-    types.KeyboardButton("Добавить запись"),
-    types.KeyboardButton("Посмотреть баланс")
-)
+# --- Старт ---
+@dp.message_handler(commands=["start"])
+async def start(message: types.Message):
+    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard.add("➕ Добавить запись")
+    await message.answer("Добро пожаловать! Выберите команду:", reply_markup=keyboard)
 
-@dp.message_handler(commands=['start'])
-async def cmd_start(message: types.Message):
-    await message.answer("Привет! Я бот учёта. Выберите действие:", reply_markup=main_menu)
-
-@dp.message_handler(lambda msg: msg.text == "Добавить запись")
-async def add_start(message: types.Message):
-    await message.answer("Введите сумму (например: 1500 или -700):", reply_markup=types.ReplyKeyboardRemove())
+# --- Добавление записи ---
+@dp.message_handler(lambda m: m.text == "➕ Добавить запись")
+async def cmd_add(message: types.Message):
+    user_id = message.from_user.id
+    if user_id not in MANAGER_MAP:
+        await message.answer("Вам недоступна эта команда.")
+        return
+    await message.answer("Введите сумму (отрицательное число = расход):")
     await AddRecord.amount.set()
 
 @dp.message_handler(state=AddRecord.amount)
-async def get_amount(message: types.Message, state: FSMContext):
-    raw = message.text.strip().replace(",", ".")
-    if not raw.startswith(("+", "-")):
-        raw = "-" + raw
+async def process_amount(message: types.Message, state: FSMContext):
     try:
-        amount = float(raw)
+        amount = float(message.text.replace(",", "."))
+        if amount > 0:
+            amount = -abs(amount)
         await state.update_data(amount=amount)
         await message.answer("Введите комментарий:")
         await AddRecord.comment.set()
     except ValueError:
-        await message.answer("Некорректная сумма. Введите число.")
+        await message.answer("Некорректная сумма. Попробуйте ещё раз.")
 
 @dp.message_handler(state=AddRecord.comment)
-async def get_comment(message: types.Message, state: FSMContext):
-    user_data = await state.get_data()
+async def process_comment(message: types.Message, state: FSMContext):
+    data = await state.get_data()
     comment = message.text
-    now = datetime.now().strftime("%d.%m.%Y %H:%M")
     user_id = message.from_user.id
-    manager_name = MANAGER_MAP.get(user_id, f"unknown_{user_id}")
-    row = [str(user_id), now, user_data['amount'], comment]
-
-    try:
-        sheets.append_to_named_sheet(manager_name, row)
-        await message.answer(f"Запись добавлена в лист: {manager_name}.", reply_markup=main_menu)
-    except Exception as e:
-        await message.answer(f"Ошибка при записи: {e}", reply_markup=main_menu)
-
+    manager_name = MANAGER_MAP.get(user_id, str(user_id))
+    sheets.append_record(manager_name, datetime.now(), data["amount"], comment)
+    await message.answer("Запись добавлена ✅")
     await state.finish()
 
-@dp.message_handler(lambda msg: msg.text == "Посмотреть баланс")
-async def show_balance(message: types.Message):
-    user_id = message.from_user.id
-    manager_name = MANAGER_MAP.get(user_id, f"unknown_{user_id}")
-    try:
-        balance = sheets.get_balance(manager_name)
-        await message.answer(f"Ваш текущий баланс: {balance:.2f} ₽", reply_markup=main_menu)
-    except Exception as e:
-        await message.answer(f"Ошибка при получении баланса: {e}", reply_markup=main_menu)
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     executor.start_polling(dp, skip_updates=True)
